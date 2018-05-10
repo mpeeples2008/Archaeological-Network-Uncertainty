@@ -1,0 +1,966 @@
+---
+title: Network science and statistical techniques for dealing with uncertainties in
+  archaeological datasets
+author: "Matthew A. Peeples"
+date: "March 13, 2017"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+require(knitr)
+# Set so that long lines in R will be wrapped:
+opts_chunk$set(tidy.opts=list(width.cutoff=75),tidy=TRUE)
+```
+
+# Citing this Document
+
+This document can be cited as follows:
+
+#### Peeples, Matthew A.
+#### 2017  Network Science and Statistical Techniques for Dealing with Uncertainties in Archaeological Datasets. [online]. Available: http://www.mattpeeples.net/netstats.html
+
+# Getting Started
+
+This markdown document provides code and detailed examples associated with the Computer Applications and Quantitative Methods in Archaeology Workshop hosted by Matt Peeples and Tom Brughmans on March 13th, 2017 in Atlanta at Georgia State University. This document assumes you have a basic knowledge of network science terminology and at least some basic familiarity with R and R Studio. If you are new to R, we recommend you first run through the brief Code School examples focused on R available here (http://tryr.codeschool.com/). The examples below can be run by simply copying and pasting the code below but modifications will require a bit of additional experience. For those new to network science in general, we recommend you start by reading the Brughmans (2014) review article (see recommended bibliography for more details).
+
+# Getting Our Data into R
+
+For the purposes of this workshop we will be using one real archaeological dataset as an example (and some simulated data). These are data from research Peeples has conducted and can be used to demonstrate some of the most common methods for archaeological network analysis. These data come from the Southwest Social Networks Project (http://www.southwestsocialnetworks.net) and represent counts of decorated ceramic wares for one 50 year interval (A.D. 1050-1100) from a series of 223 settlements with public architectural features located across the northern U.S. Southwest (Chacoan Great Houses and Great Kivas for those who like such things). This dataset is divided into two .csv files, the first with the ceramic counts by site and a second  with the attributes of those sites, including their locations. To ensure the security of site locational information as required by the state data repositories charged with maintaining these data, we have randomly relocated each settlement between 7-10 kilometers from their actual locations. The code below imports these data from the .csv files into objects we can use in R. 
+
+Right click and choose "save as" to download the [ceramic data](http://www.mattpeeples.net/AD1050cer.csv) and [attribute data](http://www.mattpeeples.net/AD1050attr.csv).
+
+Before running the code below, however, we need to ensure that our R session is set to the correct working directory (the location where you placed the .csv files for this workshop). To do that, go to the menu bar at the top and click Session > Set Working Directory > Choose Directory and navigate to the place on your hard drive where these files reside (alternatively you can hit Ctrl + Shift + H and then navigate to the appropriate directory). Once you have done that, you will be able to execute the code below by simply copying the text and then pasting it into the R console.
+
+Let's start by importing our ceramic and attribute data.
+
+```{r}
+# Import chaco ceramic data into an object named chaco. row.names=1 sets the first column values to the row names for each item.
+chaco <- read.csv(file='AD1050cer.csv',row.names=1)
+# Import attribute data into an object named chaco.attr
+chaco.attr <- read.csv('AD1050attr.csv',row.names=1)
+```
+
+# Installing and initializing the necessary libraries
+
+For the purposes of this workshop, we will rely on a few pre-existing R packages. In order to use these packages in a new installation of R and R-studio, we first need to install them. Note that you will only need to do this once on each new installation of R/R-Studio. To install packages, you can click on the "Packages" tab in the window in the bottom right of R studio, then click the "Install" button at the top and type the names of the packages separated by commas. Alternatively you can install packages from the console by simply typing "install.packages('nameofpackagehere')" without the quotation marks. 
+
+For the purposes of this workshop we will rely on the statnet and tnet packages which also install several other required packages like sna, network, and igraph. Copy the line below into the console or follow the instructions to install using the packages tab:
+
+install.packages('statnet','tnet')
+
+Once you have installed these packages we use the library console command to initialize our packages. 
+
+```{r message=F}
+library(statnet)
+library(tnet)
+```
+
+# Defining custom functions for our analyses
+
+In addition to the pre-existing R packages, there are also a few additional functions that we will need to define manually for several of our analyses below. Specifically, we want to be able to take our ceramic frequency data and convert that into a symmetric similarity or distance matrix that we will use to define and weight our networks. For the examples below, we will rely on three methods for defining these matrices: 1) Co-presence of types, 2) Brainerd-Robinson similarity, and 3) $\chi^{2}$ distances. These are only a few among a wide variety of options. 
+
+#### Co-presence
+
+The first simple measure we will use for defining networks here is the number of categories that are co-present at pairs of sites. We can calculate this measure through simple matrix algebra. First, we create a binary incidence matrix of ceramic counts by site by simply dichotomizing our count data (a matrix with 1 for all categories that are present and 0 elsewhere). We can define that incidence matrix as $A$ and the transpose (switching rows and columns) of that matrix as $A^{T}$ we can find the number of categories that overlap between sites $P$ as:
+$$P=A * A^{T}$$
+
+The result of this procedure is a symmetric matrix with the number of rows and columns determined by the number of nodes comparing each site to every other site with each cell represents counts of co-occurrence between pairs of sites. The diagonal of this matrix represents the total number of categories present for the site denoted by that row. In many cases, we may not want to count rare occurrences as "present" and may instead want to create a threshold absolute value or proportion that a given category must exceed to be counted as "present" for creating our matrix. In the example we will use here today a category must represent at least 10% of a row to be considered "present" in this calculation. The code below could be easily modified to use a different cutoff and the choice of cutoff is an important decision with substantive impacts on our networks. 
+
+The chunk of code below defines a procedure for calculating simple co-presence for all categories representing more than 10% of a given row. We then create a new object called "chacoP" which represents this matrix of co-occurrence from site to site.
+
+```{r}
+co.p <- function (x,thresh=0.1) {
+  #create matrix of proportions from chaco
+  temp <- prop.table(as.matrix(x),1) 
+  # define anything with greater than or equal to 0.1 as present (1) 
+  temp[temp>=thresh] <- 1 
+  # define all other cells as absent (0)
+  temp[temp<1] <- 0 
+  # matrix algebraic calculation to find co-occurence (%*% indicates matrix multiplication)
+  out <- temp%*%t(temp) 
+return(out)}
+
+# run the function
+chacoP <- co.p(chaco)
+```
+
+#### Brainerd-Robinson Similarity
+
+The next metric we will use here is a rescaled version of the Brainerd-Robinson (BR) similarity metric. This BR measure is commonly used in archaeology including in a number of recent (and not so recent) network studies. This measure represents the total similarity in proportional representation of categories and is defined as:
+
+$$S = {\frac{2-\sum_{k} \left|x_{k} - y_{k}\right|} {2}}$$
+
+where, for all categories $k$, $x$ is the proportion of $k$ in the first assemblage and $y$ is the proportion of $k$ in the second. This provides a scale of similarity from 0-1 where 1 is perfect similarity and 0 indicates no similarity. The chunk below defines the code for calculating this modified BR similarity measure. Note that this code could certainly be reduced and streamlined in many ways but I have chosen to use the "expanded" version for the sake of clarity for those new to R. By default, this code rounds the resulting similarity metric to three digits past the decimal for ease of viewing the output. This chunk ends by running this function for our sample dataset defining a new object "chacoBR" with the resulting similarity matrix.
+
+```{r}
+sim.mat <- function(x) {
+  # get names of sites
+  names <- row.names(x) 
+  x <- na.omit(x) # remove any rows with missing data
+  x <- prop.table(as.matrix(x),1) # convert to row proportions
+  rd <- dim(x)[1] 
+  # create an empty symmetric matrix of 0s
+  results <- matrix(0,rd,rd) 
+  # the following dreaded double for loop goes through every cell in the output data table and calculates the BR value as descried above
+    for (s1 in 1:rd) {
+    for (s2 in 1:rd) {
+      x1Temp <- as.numeric(x[s1, ])
+      x2Temp <- as.numeric(x[s2, ])
+      results[s1,s2] <- 2 - (sum(abs(x1Temp - x2Temp)))}}
+  row.names(results) <- names # assign row names to output
+  colnames(results) <- names # assign column names to output
+  results <- results/2 # rescale results between 0 and 1
+  results <- round(results,3) # round results
+  return(results)} # return the final output table
+
+# Run the function defined above on our sample data
+chacoBR <- sim.mat(chaco)
+```
+
+#### $\chi^{2}$ Distance
+
+The next measure we will use is the $\chi^{2}$ distance metric which is the basis of correspondence analysis and related methods commonly used for frequency seriation in archaeology (note that this should probably really be called the $\chi$ distance since the typical form we use is not squared, but the name persists this way in the literature so that's what we use here). This measure is defined as:
+
+$$\chi_{jk} = \sqrt{\sum \frac 1{c_{j}} 
+({x_{j}-y_{j})^{2}}}$$
+
+where $c_j$ denotes the $j_{th}$ element of the average row profile (the proportional abundance of $j$ across all rows) and $x$ and $y$ represent row profiles for the two sites under comparison. This metric therefore takes raw abundance (rather than simply proportional representation) into account when defining distance between sites. The definition of this metric is such that rare categories play a greater role in defining distances among sites than common categories (as in correspondence analysis). This measure has a minimum value of 0 and no theoretical upper limit. 
+
+The code for calculating $\chi^{2}$ distances is defined in the chunk below and a new object called "chacoX" is created using this measure. It is sometimes preferable to rescale this measure so that it is bounded between 0 and 1. We create a second object called "chacoX01" which represents rescaled distances by simply dividing the matrix by the maximum observed value (there are many other ways to convert a distance to a similarity measure but this will be fine for our current purposes).
+
+```{r}
+chi.dist <- function(x) {
+  rowprof <- x/apply(x,1,sum) # calculates the profile for every row
+  avgprof <- apply(x,2,sum)/sum(x) # calculates the average profile
+  # creates a distance object of $\chi^{2}$ distances
+  chid <- dist(as.matrix(rowprof)%*%diag(1/sqrt(avgprof))) 
+  # return the reults
+  return(as.matrix(chid))} 
+
+# Run the script and then create the rescaled 0-1 version
+chacoX <- chi.dist(chaco)
+chacoX01 <- chacoX/max(chacoX)
+```
+
+# Creating and plotting network objects from our similarity/distance matrices
+
+Now that we have defined our three measures of similarity or distance, the next step is to convert these into network objects that our R packages will be able to work with. We can do this by either creating binary networks (where ties are either present or absent) or weighted networks (which in many cases are simply the raw similarity/distance matrices we calculated above). We will provide examples of both approaches, starting with simple binary networks. There are many ways to define networks from matrices like those we generated above and our examples below should not been seen as an exhaustive set of approaches.
+
+#### Creating binary network objects
+
+First, we will create binary networks using our ceramic ware co-occurrence matrix. Sites that share a single co-occurrence will be defined as connected here. We then use the "network" function to create a network object using the argument "directed=F" to let the function know that our data are from a symmetric matrix and that ties always extend in both directions between pairs of linked nodes. See help(network) for more details on options here. 
+
+After we create this new network object we plot it first using the default graph layout (Fruchterman-Reingold - We'll discuss what this is in the workshop) and then based on the geographic location of our nodes. We're not going to spend a lot of time exploring network plotting procedures in this workshop, but for those of you who may be interested in making far prettier graphs than those used here for demonstration purposes, I would recommend exploring the new "ggraph" package. (https://github.com/thomasp85/ggraph)
+
+```{r fig.height=6,fig.width=10}
+# create network object from co-occurrence
+Pnet <- network(chacoP,directed=F)
+# Now let's add names for our nodes based on the row names of our original matrix
+Pnet %v% 'vertex.names' <- row.names(chacoP)
+# look at the results
+Pnet 
+
+# set up for plotting two plots, side by side by setting the pot to 1 row, 2 columns
+par(mfrow=c(1,2)) 
+# plot network using default layout
+plot(Pnet, edge.col='gray', edge.lwd=0.25, vertex.cex=0.5,main='co-presence network')
+# plot network using geographic coordinates
+plot(Pnet, edge.col='gray', edge.lwd=0.25, vertex.cex=0.5, coord=chaco.attr[,9:10])
+par(mfrow=c(1,1)) # return to single plotting mode
+```
+
+The next chunk of code will produce a network based on our BR similarity matrix. In this example, we define ties as present between pairs of sites when they share more than 75% commonality (BR > 0.75) in terms of the proportions of ceramic wares recovered from both sites in a dyad. 
+
+In the code below, the event2dichot function (from the statnet/network package) takes our matrix and divides it into 1s and 0s based on the cut off we choose. Here we're using and 'absolute' cut off meaning we're assigning a specific value to use as the cut off (0.75) and defining all similarity values higher than that cutoff as 1 and all other dyads as 0. We then send the output of this function to the network function just as before. After examining our new network we then plot it both using a graph layout and geographic locations.
+
+```{r fig.height=6,fig.width=10}
+# Define our binary network object from BR similarity
+BRnet <- network(event2dichot(chacoBR,method='absolute',thresh=0.75),directed=F)
+# Now let's add names for our nodes based on the row names of our original matrix
+BRnet %v% 'vertex.names' <- row.names(chacoBR)
+# look at the results.
+BRnet
+
+par(mfrow=c(1,2)) # set up for plotting two plots, side by side
+# plot network using default layout
+plot(BRnet, edge.col='gray', edge.lwd=0.25, vertex.cex=0.5,main='BR network')
+# plot network using geographic coordinates
+plot(BRnet, edge.col='gray', edge.lwd=0.25, vertex.cex=0.5, coord=chaco.attr[,9:10])
+par(mfrow=c(1,1)) # return to single plotting mode
+```
+
+In the next chunk of code we will use the $\chi^2$ distances to create binary networks. This time, we will not use an absolute value to define ties as present, but instead will define those similarities (1-distances) greater than 80 percent of all similarities as present. We will then once again plot just as above.
+
+```{r fig.height=6,fig.width=10}
+# Note we use 1 minus chacoX01 here so to convert a distance to a similarity
+Xnet <- network(event2dichot(1-chacoX01,method='quantile',thresh=0.80),directed=F)
+# Once again add vertext names
+Xnet %v% 'vertex.names' <- row.names(chacoX01)
+# look at the results
+Xnet
+
+par(mfrow=c(1,2)) # set up for plotting two plots, side by side
+# plot network using default layout
+plot(Xnet, edge.col='gray', edge.lwd=0.25, vertex.cex=0.5,main='Chi-squared network')
+# plot network using geographic coordinates
+plot(Xnet, edge.col='gray', edge.lwd=0.25, vertex.cex=0.5, coord=chaco.attr[,9:10])
+par(mfrow=c(1,1)) # return to single plotting mode
+```
+
+#### Creating and plotting weighted network objects
+
+It is also possible to use R to create weighted networks where individual edges are valued. We have found that this works reasonably well with networks of co-presence or something similar (counts of mentions in texts or monuments for example) but this does not perform well when applied to similarity or distance matrices (because every possible link has a value, however small, so the network gets unwieldy very fast). In the latter case, we have found it is better to just work directly with the underlying similarity/distance matrix.
+
+Creating a weighted network object in R is easy and only requires a slight modification from the procedure above. In the chunk of code below, we will simply add the arguments "ignore.eval=F" and "names.eval='weight'" to let the network function know we would like weights to be retained and we would like that attribute called 'weight'. We will apply this to the matrix of co-presence defined above and then plot the result showing the weights of individual ties. Although it is difficult to tell with a network this size, the lines defining the edges are scaled based on their edge weights. We further color code the nodes based on the "CSN_macro_group" (sub-region) variable in our attribute file. Although we only show this approach for the co-presence network, these same arguments work with the other matrices defined above.
+
+```{r fig.height=6,fig.width=10}
+# create weighted network object from co-occurrence matrix by adding the ignore.eval=F argument
+Pnet2 <- network(chacoP,directed=F,ignore.eval=F,names.eval='weight')
+Pnet2 %v% 'vertex.names' <- row.names(chacoP)
+Pnet2
+
+par(mfrow=c(1,2)) # set up for plotting two plots, side by side
+# create object to add color by subregion
+reg.col <- as.factor(chaco.attr$CSN_macro_group)
+# plot weighted network using default layout
+plot(Pnet2, edge.col='gray', edge.lwd='weight', vertex.cex=0.5, vertex.col=reg.col,
+     main='co-presence weighted network')
+# plot weighted network using geographic coordinates
+plot(Pnet2, edge.col='gray', edge.lwd='weight', vertex.cex=0.5, coord=chaco.attr[,9:10], vertex.col=reg.col)
+par(mfrow=c(1,1)) # return to single plotting mode
+```
+
+Now for the sake of visualization, we'll create and plot a smaller random weighted network to show how edge weights are depicted. There are many more plotting options within R base graphics and ggplot/ggraph and we direct you to the help documents for those packages for more details.
+
+```{r}
+set.seed(45645) # set random seed for repeatability
+num_nodes <- 40 # set the number of nodes
+num_edges <- 80 # set the number of edges
+# create a blank "edgelist" for this network
+edgelist <- matrix("",nrow= num_edges,ncol=2)
+# populate the edgelist with random node number assignments
+for(i in 1:num_edges) edgelist[i,] <- sample(x=seq(1,num_nodes),size=2,replace=F)
+# convert to network object (empty)
+net2 <- network.initialize(num_nodes)
+# define ties based on edglist as 1
+net2[as.matrix(edgelist)] <- 1
+# set edge weights using a random uniform draw
+edge_weights <- round(runif(num_edges,min=1,max=5))
+# apply edge weights to network object
+set.edge.value(net2,"weight",edge_weights)
+# create a scale for color coding edges from gray to darkblue
+edge.cols <- colorRampPalette(c('gray','darkblue'))(5)
+# plot network and add legend (get.edge.value uses the values of weight to color code and define line thickness
+plot(net2,usearrows=F,edge.lwd=get.edge.value(net2,"weight"),
+     edge.col=edge.cols[get.edge.value(net2,"weight")],main='random weighted network')
+legend('bottomright',legend=seq(1,5),lwd=seq(1,5),col=edge.cols)
+```
+
+# Calculating graph-level and node-level metrics
+
+One of the most common kinds of analysis for archaeological and other networks is the calculation of measures of node/edge centrality and graph centralization. There are many different measures in the literature each appropriate for different kinds of research questions and data formats (see Borgatti and Everett 2006). We will not cover the interpretation of these network metrics in depth in this workshop, but we will be using several common measures as our means of assessing the impact of missing data and other kinds of uncertainty on our interpretations of archaeological networks. 
+
+In this section, we briefly describe the network metrics we will use and then define a function to easily calculate multiple measures simultaneously on multiple networks. The primary measures we will use are the binary and weighted versions of: 1) degree centrality, 2) betweenness centrality, and 3) eigenvector centrality. We direct readers to Peeples and Roberts (2013) and especially the online supplemental materials for that article for more details on the calculation of these metrics.
+
+Degree centrality for a node is defined as the total number of direct connections in which that node is involved. In weighted networks, this is simply the total weight of all connections for that node (minus 1 to remove self-loops). Betweenness centrality is defined as the number of shortest paths between pairs of nodes in a network involving the target node divided by the total number of shortest paths in the network as a whole. For binary networks, shortest paths are defined as the smallest number of direct ties that must be crossed to get from one specific node to another. Calculating betweenness centrality for weighted networks is a bit more complicated. The method we use here come from Opsahl and others (2010). This approach defines shortest paths as the "path of least resistance" between pairs of target nodes. In other words, the stronger the path (the higher the edge weights) the "shorter" it is according to this algorithm. Refer to Peeples and Roberts (2013) for more details. Eigenvector centrality is a measure of a node's importance in a network defined in relation to the first eigenvector of the adjacency matrix of nodes for both binary and weighted networks. For both binary and weighted networks, a node's eigenvector centrality score is proportional to the summed scores of other nodes to which it is connected. In other words, eigenvector centrality for a node will increase if a node is either connected to lots of other nodes, or if a node is connected to highly central nodes. We rescale this measure as is commonly seen in the network science literature so that the sum of squared scores is equal to the total number of nodes in that network.
+
+The chunk of code below contains two functions: 1) the first calculates the three measures of centrality described above for binary networks and 2) the second calculates these measures for weighted networks (or similarity matrices). The results are by default returned in a matrix with a column for each measure and a row for each node. Note that the statnet/sna package uses some of the same names for functions as tnet/igraph. Thus, we must specify which package we mean to use in the code below (e.g., sna::degree means the degree calculation method used in the sna package which is initialized through statnet. If we wished to use the igraph version we would instead use igraph::degree).
+
+```{r}
+# Calculate centrality scores for binary networks
+net.stats <- function(y){ 
+# calculate degree centrality
+dg <- as.matrix(sna::degree(y,gmode='graph')) 
+# calculate and scale eigenvector centrality
+eg <- as.matrix(sna::evcent(y)) 
+eg <- sqrt((eg^2)*length(eg)) 
+# calculate betweenness centrality
+bw <- sna::betweenness(y,gmode='graph') 
+# combine centrality scores into matrix
+output <- cbind(dg,eg,bw) 
+rownames(output) <- rownames(as.matrix(y)) 
+colnames(output) <- c('dg','eg','bw') 
+return (output)} # return results of this function
+
+# Calculate centrality scores for weighted networks (similarity matrices)
+net.stats.wt <- function(y){ 
+# calculate weighted degree as the sum of weights - 1
+dg.wt <- as.matrix(rowSums(y)-1) 
+# calculate weighted eigenvector centrality and rescale
+eg.wt <- as.matrix(sna::evcent(y)) 
+eg.wt <- sqrt((eg.wt^2)*length(eg.wt))
+# calculate weighted betweenness from the tnet package (we use the suppressWarnings package to avoid notifications)
+bw.wt <- suppressWarnings(betweenness_w(y,directed=F))[,2] 
+output <- cbind(dg.wt,eg.wt,bw.wt) 
+rownames(output) <- rownames(as.matrix(y))
+colnames(output) <- c('dg.wt','eg.wt','bw.wt') 
+return (output)} # return results of this function
+```
+
+Now let's calculate these measures for our networks defined above and look at the first couple of rows for the final example based on the $\chi^2$ network.
+
+```{r}
+# net stats for binary co-presence network
+co.p.stats <- net.stats(Pnet)
+# net stats for binary BR similarity network
+BR.stats <- net.stats(BRnet)
+# net stats for binary X^2 similarity network (1-distance)
+X.stats <- net.stats(Xnet)
+head(X.stats)
+```
+
+And now let's calculate the weighted versions.
+
+```{r warning=F}
+# net stats for weighted co-presence network
+co.pw.stats <- net.stats.wt(chacoP)
+# net stats for weighted BR similarity network
+BR.stats.w <- net.stats.wt(chacoBR)
+# net stats for X^2 similarity (1-distance)
+X.stats.w <- net.stats.wt(1-chacoX01)
+head(X.stats.w)
+```
+
+It is also often informative to evaluate graph-level measures of centralization. In the code below, we calculate centralization measures associated with the node-level centrality measures described above. These measures are essentially a measure of how central all nodes in our network are in relation to a theoretical maximum. We can calculate most measures using existing functions but we need to create a custom function for calculating weighted betweenness centralization. Again Peeples and Roberts (2013) provide more details. 
+
+```{r}
+## calculate centralization measures for binary network 
+cent.bin <- function(net) {
+output <- matrix(0,1,3)
+colnames(output) <- c('degree','between','eigen')
+#calculate binary degree centralization
+output[1,1] <- centralization(net,sna::degree,normalize=T) 
+#calculate binary eigenvector centralization
+output[1,2] <- centralization(net,sna::evcent,normalize=T) 
+#calculate binary betweenness centralization
+output[1,3] <- centralization(net,sna::betweenness,normalize=T) 
+return(output)}
+
+# define function for calculating weighted betweenness centralization
+bw.cent <- function(x){ 
+Cstar <- max(x) 
+Csum <- (Cstar-x) 
+num <- 2*(sum(Csum)) 
+den <- ((length(x)-1)^2)*(length(x)-2) 
+out <- num/den 
+return(out)} # output result of this function
+
+## calculate centralization measures for weighted network 
+cent.wt <- function(sim) {
+output <- matrix(0,1,3)
+colnames(output) <- c('degree.wt','eigen.wt','between.wt')
+#calculate degree centralization
+output[1,1] <- centralization(sim,sna::degree,normalize=T) 
+#calculate eigenvector centralization
+output[1,2] <- centralization(sim,sna::evcent,normalize=T) 
+# calculate betweenness centralization
+output[1,3] <- bw.cent(sim)
+return(output)}
+```
+
+Now let's see examples of a couple of results using these functions focusing on the BR measure for now. 
+
+```{r}
+# BR binary net centralization
+cent.bin(BRnet)
+# BR similarity centralization
+cent.wt(chacoBR)
+```
+
+# Assessing the potential impact of missing nodes
+
+Now (finally) we're ready to get into the meat of this workshop; assessing the impact of various forms of uncertainty on archaeological networks. The first example we will work with is the potential impact of missing nodes. In almost any archaeological network study, the networks we create are incomplete (i.e., we know that we are missing nodes for various reasons; site destruction, lack of survey coverage, looting, etc.). How might the fact that our networks are samples of a larger and typically unobtainable "complete network" influence our interpretations of network structure and node position? In this section, we are going to follow the lead of a study previously published in the journal *Social Networks* focused on this same issue (Costenbader and Valente 2003; see also Borgatti et al. 2006).
+
+The overarching goal of the work by Costenbader and Valente (2003) was to take an existing network sampled from a (perhaps unknowable) population and determine how robust different structural and positional aspects of that network are to sub-sampling. This procedure, along with a careful consideration of the nature and quality of our sample, allows us to estimate the degree to which certain aspects of our sampled network do or do not approximate the same aspects of the original "complete" network from which it was drawn. Essentially, the idea is that if a particular metric is robust to sub-sampling in the data we have, we may have greater faith that a particular measure approximates the value in the complete network. Importantly, when we use the same underlying data to produce different networks as we have here (binary and weighted networks, networks of co-presence, BR similarity, and $\chi^2$ distance) we can further determine the degree to which different network definitions are vulnerable to different kinds of sampling issues. Due to this, we argue that it is good practice to explore a range of network definitions. 
+
+The basic approach advocated by Costenbader and Valente is to take a given network and then sub-sample it at intervals of 10% (producing some large number of replicates for each sampling fraction) and then calculate a set of network centrality and centralization metrics for every replicate of at each sampling fraction. We then calculate rank-order correlations (Spearman's $\rho$) between the metrics for the original network sample and every sub-sample. This allows us to evaluate the average correlation and error at each sampling fraction.
+
+In order to do this, we first provide a modifiable chunk of code that conducts this procedure for a single centrality (or centralization measure) and then plots the results as a boxplot. You may get some warning messages when you run this code if your random sub-samples end up creating a situation where some nodes connected to nothing (but the output will still be correct). For the sake of time in this workshop, we are only making 25 random replicates, but good practice suggests using many more (set the script running and go to lunch has always been my strategy).
+
+#### Single measure example
+
+```{r warning=F}
+nsim <- 25 # set number of replicates
+
+# define function for testing betweenness centrality stability across sub-samples
+resamp.test <- function(x){
+  #the next line can be replaced with any centrality measure you'd like
+  bw.g <- sna::betweenness(x,gmode='graph') 
+  mat <- as.matrix(x)
+  dim.x <- dim(mat)[1]
+  out.mat <- matrix(NA,nsim,9) # create matrix for output and then name
+  colnames(out.mat) <- c('S90','S80','S70','S60','S50','S40','S30','S20','S10')
+  # this double loop goes through each sampling fraction and each random replicate to cacluate centrality statistics and runs a Spearman's rho correlation between the resulting centrality values and the original sample
+  for (j in 1:9) {
+  for (i in 1:nsim) {
+    # this sampling procedure samples without replacement from a sequence from 1 to the total number of nodes, the size of the sample being determined by     10-j/10. For example if j=1, 10-1/10 = 0.9 or a 90% sub-sample. 
+    sub.samp <- sample(seq(1,dim.x),size=round(dim.x*((10-j)/10),0),replace=F)
+    # calculate the betweenness statistic for the matrix reduced to only include the sub-sampled rows/columns
+    temp.stats <- sna::betweenness(mat[sub.samp,sub.samp],gmode='graph')
+    #calcuate spearman's rho for replicate
+    out.mat[i,j] <- suppressWarnings(cor(temp.stats,bw.g[sub.samp],method='spearman'))}}
+return(out.mat)} # return the result
+
+# display results as boxplot by sampling fraction
+boxplot(resamp.test(BRnet),ylim=c(0,1),main='BR - betweenness',xlab='sampling fraction',ylab='Spearmans rho')
+```
+
+#### Combined example
+
+The next chunk of code provides a single function that automates all of the steps described above using the centrality measures previously defined for both binary and weighted networks. 
+
+```{r}
+# The following function does the same calculation as above but is set up to work with the output of net.stats and net.stats.wt
+nsim <- 25
+samp.frac <- c('S90','S80','S70','S60','S50','S40','S30','S20','S10')
+
+cv.resamp.bin <- function(x){
+  # calculate all network stats for the original network
+  stats.g <- net.stats(x)
+  mat <- as.matrix(x)
+  dim.x <- dim(mat)[1] # count number of rows (nodes)
+  # define empty matrices for output
+  dg.mat <- matrix(NA,nsim,9)
+  ev.mat <- matrix(NA,nsim,9)
+  bw.mat <- matrix(NA,nsim,9)
+  # add column names based on sampling fraction
+  colnames(dg.mat) <- samp.frac
+  colnames(ev.mat) <- samp.frac
+  colnames(bw.mat) <- samp.frac
+  
+  # this double loop goes through each sampling fraction and each random replicate to cacluate centrality statistics and runs a Spearman's rho correlation between the resulting centrality values and the original sample
+  for (j in 1:9) {
+  for (i in 1:nsim) {
+    sub.samp <- sample(seq(1,dim.x),size=round(dim.x*((10-j)/10),0),replace=F)
+    temp.stats <- net.stats(mat[sub.samp,sub.samp])
+    dg.mat[i,j] <- suppressWarnings(cor(temp.stats[,1],stats.g[sub.samp,1],method='spearman'))
+    ev.mat[i,j] <- suppressWarnings(cor(temp.stats[,2],stats.g[sub.samp,2],method='spearman'))
+    bw.mat[i,j] <- suppressWarnings(cor(temp.stats[,3],stats.g[sub.samp,3],method='spearman'))
+  }}
+out.list <- list() # create list for output and populate it
+out.list[[1]] <- dg.mat
+out.list[[2]] <- ev.mat
+out.list[[3]] <- bw.mat 
+return(out.list)} # return the resulting list
+
+# And now for the version for weighted networks (similarity matrices)
+cv.resamp.wt <- function(x){
+  # calculate network stats for the original network
+  stats.g <- net.stats.wt(x)
+  mat <- as.matrix(x)
+  dim.x <- dim(mat)[1]
+  # create empty matrices for output
+  dg.mat <- matrix(NA,nsim,9)
+  ev.mat <- matrix(NA,nsim,9)
+  bw.mat <- matrix(NA,nsim,9)
+  # add column names by sampling fraction
+  colnames(dg.mat) <- samp.frac
+  colnames(ev.mat) <- samp.frac
+  colnames(bw.mat) <- samp.frac
+
+  # this double loop goes through each sampling fraction and each random replicate to cacluate centrality statistics and runs a Spearman's rho correlation between the resulting centrality values and the original sample
+  for (j in 1:9) {
+  for (i in 1:nsim) {
+    sub.samp <- sample(seq(1,dim.x),size=round(dim.x*((10-j)/10),0),replace=F)
+    temp.stats <- net.stats.wt(mat[sub.samp,sub.samp])
+    dg.mat[i,j] <- suppressWarnings(cor(temp.stats[,1],stats.g[sub.samp,1],method='spearman'))
+    ev.mat[i,j] <- suppressWarnings(cor(temp.stats[,2],stats.g[sub.samp,2],method='spearman'))
+    bw.mat[i,j] <- suppressWarnings(cor(temp.stats[,3],stats.g[sub.samp,3],method='spearman'))
+  }}
+out.list <- list() # create list for output
+out.list[[1]] <- dg.mat
+out.list[[2]] <- ev.mat
+out.list[[3]] <- bw.mat
+return(out.list)} # return the results
+```
+
+Now let's run this for each of our binary and weighted networks defined above.
+
+```{r warning=F}
+cop.rs <- cv.resamp.bin(Pnet)
+BR.rs <- cv.resamp.bin(BRnet)
+X.rs <- cv.resamp.bin(Xnet)
+
+copw.rs <- cv.resamp.wt(chacoP)
+BRw.rs <- cv.resamp.wt(chacoBR)
+Xw.rs <- cv.resamp.wt(1-chacoX01)
+```
+
+#### Plotting the results and assessing the impact
+
+Once we've calculated the statistics for all of these sub-samples, it is then possible to plot the results to see how each network definition and each measure behaves in relation to sub-sampling. Let's do that first for the three binary networks.
+
+```{r fig.height=10,fig.width=10}
+par(mfrow=c(3,3)) # set up for 3 by 3 plotting
+# plot boxplots by sampling fraction for each measure and each network type
+boxplot(cop.rs[[1]],ylim=c(0,1),main='co-presence - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(cop.rs[[2]],ylim=c(0,1),main='co-presence - eigenvector',xlab='sampling fraction')
+boxplot(cop.rs[[3]],ylim=c(0,1),main='co-presence - betweenness',xlab='sampling fraction')
+boxplot(BR.rs[[1]],ylim=c(0,1),main='BR - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(BR.rs[[2]],ylim=c(0,1),main='BR - eigenvector',xlab='sampling fraction')
+boxplot(BR.rs[[3]],ylim=c(0,1),main='BR - betweenness',xlab='sampling fraction')
+boxplot(X.rs[[1]],ylim=c(0,1),main='Chi squared - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(X.rs[[2]],ylim=c(0,1),main='Chi squared - eigenvector',xlab='sampling fraction')
+boxplot(X.rs[[3]],ylim=c(0,1),main='Chi squared - betweenness',xlab='sampling fraction')
+par(mfrow=c(1,1)) # return to single plotting
+```
+
+Now let's do the same for the weighted networks.
+
+```{r fig.height=10,fig.width=10}
+par(mfrow=c(3,3)) # set up for 3 by 3 plotting
+# plot boxplots by sampling fraction for each measure and each network type
+boxplot(copw.rs[[1]],ylim=c(0,1),main='co-presence - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(copw.rs[[2]],ylim=c(0,1),main='co-presence - eigenvector',xlab='sampling fraction')
+boxplot(copw.rs[[3]],ylim=c(0,1),main='co-presence - betweenness',xlab='sampling fraction')
+boxplot(BRw.rs[[1]],ylim=c(0,1),main='BR - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(BRw.rs[[2]],ylim=c(0,1),main='BR - eigenvector',xlab='sampling fraction')
+boxplot(BRw.rs[[3]],ylim=c(0,1),main='BR - betweenness',xlab='sampling fraction')
+boxplot(Xw.rs[[1]],ylim=c(0,1),main='Chi squared - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(Xw.rs[[2]],ylim=c(0,1),main='Chi squared - eigenvector',xlab='sampling fraction')
+boxplot(Xw.rs[[3]],ylim=c(0,1),main='Chi squared - betweennesss',xlab='sampling fraction')
+par(mfrow=c(1,1)) # return to single plotting mode
+```
+
+In general, the results above suggest that degree and eigenvector centrality are both quite robust to node sub-sampling in the data we are using here for both weighted and binary networks. This is perhaps not surprising since these measures rely on first-order connections. Betweenness, on the other hand, changes considerably from the original sample as the sampling fraction decreases for both the weighted and binary networks. This makes intuitive sense as betweenness measures are dependent on paths that take more of the total network structure into account and thus, would likely be more influenced by sub-sampling. Notably, the co-presence method for both binary and weighted networks are less impacted by sub-sampling than the similarity/distance measures. This is in line with previous work focused on similar archaeological networks (see Peeples et al. 2016).
+
+#### Node specific assessment
+
+In some cases, we may be interested not just in the stability of the overall rank order distribution of centrality scores in relation to sub-sampling, but we may also be interested in the positions of individual nodes. This is a common concern in explorations of so-called "Dark Networks" focused on for example drug cartels or terrorist organizations. We may want to ask: Is the most central node consistently most central? How does a reduced sampling fraction influence our ability to identify the most central nodes? Which nodes would have the greatest impact on the network if removed?
+
+One simple way of exploring the stability of the positions of the top (or any position) nodes in relation to sub-sampling is to create some large number of replicates at a given sampling fraction and compare the rank-order position of the top nodes from the original data across the simulated sub-samples. If we see that the top nodes retain their relative rank positions across a range of sub-sampling fractions (for example, if the #2 node is consistently #2 across some large proportion of the simulated sub-samples), we may then put more faith in the relative positions of node centrality scores in our original network sample. Of course we must also take into account the quality and size of our original sample when evaluating these results. 
+
+The function in the chunk of code below produces 1000 sub-samples of a network object at a given sample fraction (determined by samp.frac) and returns the results as a matrix.
+
+```{r warning=F}
+nsim <- 1000 #set number of replicates
+
+resamp.node <- function(x,samp.frac){
+  mat <- as.matrix(x)
+  dim.x <- dim(mat)[1]
+  out.mat <- matrix(NA,dim.x,nsim)
+  for (i in 1:nsim) {
+    sub.samp <- sample(seq(1,dim.x),size=round(dim.x*samp.frac,0),replace=F)
+    # calculate centrality statistic for a given sub-sample and put in output matrix
+    temp.stats <- sna::degree(mat[sub.samp,sub.samp],gmode='graph')
+    out.mat[sub.samp,i] <- temp.stats}
+return(out.mat)}
+```
+
+Now, let's use this function on our BR network object BRnet focusing on degree centrality here. First, we find rank order of degree centrality scores in our original network. Then we call the function above first at a sampling fraction of 80% (samp.frac=0.8). We can then produce a barplot of the results for the first 4 nodes from the original network. We then produce another set of figures at a sampling fraction of 50%.
+
+```{r fig.width=5,fig.height=5}
+# calculate the rank order of degree centrality in the BR network
+top.dg <- rank(-sna::degree(BRnet),ties.method='min')
+par(mfrow=c(2,2))
+BR.resamp <- resamp.node(BRnet,samp.frac=0.8) #samp.frac is 80%
+# calculate the rank order of the replicates and plot the top 4 as barplots showing rank across all replicates
+for (i in 1:4) {
+barplot(table(apply(-BR.resamp,2,rank,ties.method='random',na.last='keep')[order(top.dg)[i],]),main=paste('samp.frac=80%, rank = ',top.dg[order(top.dg)[i]]))}
+
+BR.resamp <- resamp.node(BRnet,samp.frac=0.5) #samp.frac is 50%
+# calculate the rank order of the replicates and plot the top 4 as barplots showing rank across all replicates
+for (i in 1:4) {
+barplot(table(apply(-BR.resamp,2,rank,ties.method='random',na.last='keep')[order(top.dg)[i],]),main=paste('samp.frac=50%, original rank = ',top.dg[order(top.dg)[i]]))}
+par(mfrow=c(1,1))
+```
+
+As the plots above illustrate, top nodes in terms of degree centrality tend to consistently appear in similar rank positions in the replicated networks, even when sub-sampled by as much as 50%. We can also see, however, that the smaller sampling fraction does lead to considerably more variation in position. Next, let's take a look at an example using betweenness centrality sub-sampled at 50%
+
+```{r fig.width=5,fig.height=5}
+resamp.bw <- function(x,samp.frac){
+  mat <- as.matrix(x)
+  dim.x <- dim(mat)[1]
+  out.mat <- matrix(NA,dim.x,nsim)
+  for (i in 1:nsim) {
+    sub.samp <- sample(seq(1,dim.x),size=round(dim.x*samp.frac,0),replace=F)
+    temp.stats <- sna::betweenness(mat[sub.samp,sub.samp],gmode='graph')
+    out.mat[sub.samp,i] <- temp.stats}
+return(out.mat)}
+
+# calculate the rank order of betweenness centrality in the BR network
+top.bw <- rank(-sna::betweenness(BRnet),ties.method='min')
+par(mfrow=c(2,2))
+BR.resamp <- resamp.bw(BRnet,samp.frac=0.5)
+for (i in 1:4) {
+barplot(table(apply(-BR.resamp,2,rank,ties.method='random',na.last='keep')[order(top.dg)[i],]),main=paste('samp.frac=50%, rank = ',top.bw[order(top.bw)[i]]))}
+par(mfrow=c(1,1))
+```
+
+We can see that the rank order of top nodes for betweenness centrality is considerably more variable than that for degree centrality, and indeed the rank positions starts approximating a normal distribution. This suggests that we should not put much stock in the relative positions of nodes in terms of betweenness centrality if our network sample is small (relative to our hypothesized "complete" network). We can use this information to help us temper our interpretations of results.
+
+# Assessing the potential impact of missing edges
+
+In some cases, we are interested in the potential impact of missing edges rather than missing nodes. For example, if we have created a network of co-presence (based on shared ceramic types, site mentions on monuments, or some other similar data) how robust is our network to the omission of certain edges? How are different centrality metrics influenced by edge omission?
+
+In this section, will conduct an analysis similar to that described above for assessing missing nodes. Specifically, we will sub-sample our networks by removing a fraction of edges and then test the stability of centrality measures and node position across a range of sampling fractions. Since this procedures is, in many ways, parallel to the discussion above, we will spend less time in this section setting up our examples.
+
+The first thing we will do, based on our example above, is set up a function to sub-sample network edges at sampling fractions from 90% to 10% and assess the rank order correlation of nodes (note that we could do the same for edges with a few changes to the code below). 
+
+```{r}
+nsim <- 25 # set number of replicates
+
+# set up function for edge deletion for eigenvector centrality
+resamp.edge <- function(x){
+  #the next line can be replaced with any centrality measure you'd like
+  ev.g <- sna::evcent(x,gmode='graph') 
+  mat <- as.matrix(x)
+  dim.x <- dim(mat)[1]
+  out.mat <- matrix(NA,nsim,9) # create matrix for output and then name
+  colnames(out.mat) <- c('S90','S80','S70','S60','S50','S40','S30','S20','S10')
+  # this double loop goes through each sampling fraction and each random replicate to cacluate centrality statistics and 
+  for (j in 1:9) {
+  for (i in 1:nsim) {
+    # our sampling fraction is defined here using the network.edgecount function which tells us the total number of active edges in a network object.
+    sub.samp <- sample(seq(1,network.edgecount(x)),size=round(network.edgecount(x)*(j/10),0),replace=F)
+    temp.net <- x
+    net.reduced <- network::delete.edges(temp.net,sub.samp)
+    temp.stats <- sna::evcent(net.reduced,gmode='graph')
+    #calcuate spearman's rho for replicate and output result
+    out.mat[i,j] <- cor(temp.stats,ev.g,method='spearman')}}
+return(out.mat)} # return results
+
+#display results as boxplot
+boxplot(resamp.edge(BRnet),ylim=c(0,1),main='BR - eigenvector',xlab='sampling fraction',ylab='Spearmans rho')
+```
+
+As we did for the node sub-sampling procedure above, we will now create a function that calculates correlations between our original and sub-sampled replicates for all three of our primary measures of centrality using the format form the net.stats function. We're only going to include the version for binary networks here since "edge deletion" in our similarity based networks requires a different approach. 
+
+```{r}
+# The following function does the same calculation as above but is set up to work with the output of net.stats
+nsim <- 25
+samp.frac <- c('S90','S80','S70','S60','S50','S40','S30','S20','S10')
+
+cv.resamp.edge <- function(x){
+  stats.g <- net.stats(x)
+  mat <- as.matrix(x)
+  dim.x <- dim(mat)[1]
+  dg.mat <- matrix(NA,nsim,9)
+  ev.mat <- matrix(NA,nsim,9)
+  bw.mat <- matrix(NA,nsim,9)
+  colnames(dg.mat) <- samp.frac
+  colnames(ev.mat) <- samp.frac
+  colnames(bw.mat) <- samp.frac
+
+  for (j in 1:9) {
+  for (i in 1:nsim) {
+    sub.samp <- sample(seq(1,network.edgecount(x)),size=round(network.edgecount(x)*(j/10),0),replace=F)
+    temp.net <- x
+    net.reduced <- network::delete.edges(temp.net,sub.samp)
+    temp.stats <- net.stats(net.reduced)
+    dg.mat[i,j] <- cor(temp.stats[,1],stats.g[,1],method='spearman')
+    ev.mat[i,j] <- cor(temp.stats[,2],stats.g[,2],method='spearman')
+    bw.mat[i,j] <- cor(temp.stats[,3],stats.g[,3],method='spearman')
+  }}
+out.list <- list()
+out.list[[1]] <- dg.mat
+out.list[[2]] <- ev.mat
+out.list[[3]] <- bw.mat
+return(out.list)}
+
+# run the script for our three binary networks
+cop.edge <- cv.resamp.edge(Pnet)
+BR.edge <- cv.resamp.edge(BRnet)
+X.edge <- cv.resamp.edge(Xnet)
+```
+
+Now let's plot the results for our co-presence, BR, and $\chi^2$ networks.
+
+```{r fig.height=10,fig.width=10}
+par(mfrow=c(3,3))
+boxplot(cop.edge[[1]],ylim=c(0,1),main='co-presence - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(cop.edge[[2]],ylim=c(0,1),main='co-presence - eigenvector',xlab='sampling fraction')
+boxplot(cop.edge[[3]],ylim=c(0,1),main='co-presence - betweenness',xlab='sampling fraction')
+boxplot(BR.edge[[1]],ylim=c(0,1),main='BR - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(BR.edge[[2]],ylim=c(0,1),main='BR - eigenvector',xlab='sampling fraction')
+boxplot(BR.edge[[3]],ylim=c(0,1),main='BR - betweenness',xlab='sampling fraction')
+boxplot(X.edge[[1]],ylim=c(0,1),main='Chi squared - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(X.edge[[2]],ylim=c(0,1),main='Chi squared - eigenvector',xlab='sampling fraction')
+boxplot(X.edge[[3]],ylim=c(0,1),main='Chi squared - betweenness',xlab='sampling fraction')
+par(mfrow=c(1,1))
+```
+
+As this example demonstrates, all of our networks are vulnerable to edge deletion, but once again, the first-order measures perform considerably better than betweenness centrality for our BR and $\chi^2$ networks (notably not for co-presence). This suggests that we should be particularly wary of and underlying bias in the data used to generate our networks that may influence the presence or absence of edges (more on that later). We might further ask, however, if such a process of random edge deletion is realistic when our networks are generated from counts of ceramics. In many cases, it may be that we are missing edges (or nodes) due to systematic bias/errors rather than random errors. Where we have some sense of what may be driving our missing data, it is possible to adapt the methods described above to simulate systematic bias in sampling. We will do some of this below in our discussion of sample size, but this is an issue that calls for careful attention in any archaeological network analysis.
+
+# Exploring "acyclic" networks
+
+The networks that have been the focus of the majority of this tutorial so far are built from incidence matrices using either similarity metrics or co-presence to define the presence or weight of ties. These kinds of networks inherently have a lot "built in" redundancy. For example, by definition if site A is similar to Site B and Site C, then site B and C will typically be quite similar to each other. Although there are tendancies toward such "closure" of relations in many empirical social networks, this kind of relationship is not always so strictly determined as it is in the examples above. For example, if we were to build a network of connections based on mentions of sites on monuments, just because A is connected to B and C doesn't mean that B and C will be connected to each other. One common kind of network that has such properties is a "citation" network based on citations in academic papers. These networks are "acylic" because although a later paper can cite an earlier paper, there is no way for an earlier paper to cite a yet-to-be-written later paper. We might expect that networks lacking cycles completely or even thouse that lack the strong tendancy toward the closure of triads to behave differently in relation to specific perturbations because they lack the built in redundency of our exmaples above (especially in terms of first order processes).
+
+In order to explore how edge and node deletion could potentially impact such "citation" style networks, we can simulate a random network that perhaps more closely approximates many archaeological examples using the previously defined code from our simulated weighted network above. In this example, we create a network with 100 nodes and 1000 randomly assigned ties and the plot it. 
+
+```{r}
+set.seed(654215) # set random seed for repeatability
+num_nodes <- 100 # set the number of nodes
+num_edges <- 1000 # set the number of edges
+edgelist <- matrix("",nrow= num_edges,ncol=2)
+for(i in 1:num_edges) edgelist[i,] <- sample(x=seq(1,num_nodes),size=2,replace=F)
+net2 <- network.initialize(num_nodes,directed=F)
+net2[as.matrix(edgelist)] <- 1
+
+plot(net2)
+```
+
+Now let's use our resampling functions for both nodes and edges to see how this random "hairball" network is impacted by the deletion of nodes and edges. Let's start with node deletion first. You will likely get several warnings when running this code as the node/edge deletion procedures often produce "pathological" networks with no solution for the eigenvector centrality calculation.
+
+```{r fig.width=10, warning=F}
+par(mfrow=c(1,3))
+sim.plot <- cv.resamp.bin(net2)
+boxplot(sim.plot[[1]],ylim=c(0,1),main='co-presence - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(sim.plot[[2]],ylim=c(0,1),main='co-presence - eigenvector',xlab='sampling fraction')
+boxplot(sim.plot[[3]],ylim=c(0,1),main='co-presence - betweenness',xlab='sampling fraction')
+par(mfrow=c(1,1))
+```
+
+And now for edge deletion.
+
+```{r fig.width=10, warning=F}
+par(mfrow=c(1,3))
+sim.plot2 <- cv.resamp.edge(net2)
+boxplot(sim.plot2[[1]],ylim=c(0,1),main='co-presence - degree',xlab='sampling fraction',ylab='Spearmans rho')
+boxplot(sim.plot2[[2]],ylim=c(0,1),main='co-presence - eigenvector',xlab='sampling fraction')
+boxplot(sim.plot2[[3]],ylim=c(0,1),main='co-presence - betweenness',xlab='sampling fraction')
+par(mfrow=c(1,1))
+```
+
+As these examples illustrate, networks that do not have the "built in" redundancy of converted incidence matrices are WAY more sensitive to both node and edge deletion. Indeed, the correlations decline fairly monotonically and steeply as the sampling fraction is reduced. Although this simulated network perhaps doesn't approximate specific archaeological cases, this example highlights the fact that different kinds of networks built based on different kinds of information may have very different profiles of vulnerability to uncertainty. This example perhaps provides inspiration to conduct the kinds of analyses we're exploring here to ensure that interpretations of archaeological networks are properly contextualized. 
+
+# Edge likelihood methods for estimating the structure of valued networks
+
+In this section we take inspiration from some recent work in the area of "Dark Networks" (see Everton 2012). In this field, a number of methods have recently been developed that allow us to more directly incorporate our assessments of the reliability of specific edges into our analysis. This can be done in a number of different ways. Perhaps the most common approach for networks based on data gathered from intelligence sources (such as studies of terrorist networks) is to qualitatively assign different levels of confidence to ties between pairs of actors using an ordinal scale determined based on the source of the information (reliable, usually reliable,... unreliable). This ordinal scale of confidence can then be converted into a probability (from 0 to 1) and that probability value could be used to inform the creation of a range of "possible" networks given the underlying data.
+
+We are not aware of any archaeological examples where edges have been formally/qualitatively assigned "confidence levels" in exactly this way, but we think there are potential applications of this method. For example, we could define a network where we assign a low probability of a tie between two archaeological sites if they share an import from a third site/region and a higher probability for a tie between two sites if they share imports from each other's region. Importantly, such methods can be used to combine information from different sources into a single assessment of the likelihood of connection. 
+
+Since we do not have any data structured in exactly this way, we will again simulate a small example and then analyze it. Let's create a network with ties associated with "probabilities" and the plot it.
+
+```{r}
+#create random weighted network edgelist with weights from list
+sim.edge <- as.matrix(rg_w(nodes=20,arcs=80,weights=c(0.2,0.4,0.6,0.8,1),directed=F,seed=41267))
+sim.net2 <- network.initialize(20)
+sim.net2[sim.edge] <- 1
+set.edge.value(sim.net2,'weight',sim.edge[,3])
+
+# plot the example and add a legend
+plot(sim.net2,usearrows=F,edge.lwd=get.edge.value(sim.net2,"weight")*5,
+     edge.col=edge.cols[get.edge.value(sim.net2,"weight")*5],vertex.cex=sna::degree(sim.net2)/3,
+     displaylabels=T,label.pos=5,label.col='white',label.cex=0.5)
+legend('bottomright',legend=seq(0.2,1,by=0.2),lwd=seq(1,5),col=edge.cols)
+```
+
+In the example above we have scaled nodes based on their degree centrality. The network as we have plotted it here represents all potential ties, even those with low associated probabilities. It is also possible to plot a network where only ties greater than some threshold probability are shown (this is similar to our BR and $\chi^2$ cutoff defined above). Another approach would be to actually simulate some large number of networks from the matrix of probabilities with each edge defined as either present or absent in each simulated network based on the associated probability assigned to that dyad. For example, an edge with a probability of 0.2 would be present in about 20% of random networks. Doing this repeatedly allows us to assess the potential range of possible network configurations and their properties.
+
+The following chunk of code creates 100 random networks with edges randomly defined as present or absent using a binomial model with the associated probabilities. The script collects these networks and as well as degree centrality for every node in every replicate.
+
+```{r}
+nsim <- 100
+set.seed(489491)
+
+sim.out <- matrix(NA,nsim,20)
+colnames(sim.out) <- seq(1,20)
+net.list <- list()
+
+for (j in 1:nsim) {
+sub.v <- NULL
+for (i in 1:nrow(sim.edge)) {
+  temp <- rbinom(1,1,prob=sim.edge[i,3])
+  if (temp==1) {sub.v <- c(sub.v,i)}}
+sim.net <- network.initialize(20)
+sim.net[sim.edge[sub.v,]] <- 1
+set.edge.value(sim.net,'weight',sim.edge[sub.v,3])
+net.list[[j]] <- sim.net
+sim.out[j,] <- sna::degree(sim.net)}
+```
+
+By way of example, let's look at three of the random networks generated through this procedure. Note that there are many similarities in the sizes of nodes but that the overall configuration do differ in meaningful ways.
+
+```{r fig.width=10,fig.height=5}
+par(mfrow=c(1,3))
+plot(net.list[[1]],usearrows=F,edge.lwd=get.edge.value(sim.net,"weight")*5,
+     edge.col=edge.cols[get.edge.value(sim.net,"weight")*5],vertex.cex=sim.out[1,]/3)
+plot(net.list[[2]],usearrows=F,edge.lwd=get.edge.value(sim.net,"weight")*5,
+     edge.col=edge.cols[get.edge.value(sim.net,"weight")*5],vertex.cex=sim.out[2,]/3)
+plot(net.list[[3]],usearrows=F,edge.lwd=get.edge.value(sim.net,"weight")*5,
+     edge.col=edge.cols[get.edge.value(sim.net,"weight")*5],vertex.cex=sim.out[3,]/3)
+par(mfrow=c(1,1))
+```
+
+Next, let's look at boxplots of degree centrality by node for all the random replicates. In this example, the boxplots are ordered based on their centrality in the original network with all ties active from low (left) to high (right)
+
+``` {r fig.height=6, fig.width=6}
+boxplot(sim.out[,order(sna::degree(sim.net2))])
+```
+
+As this plot shows, in general, nodes with high degree centrality in the network where all ties are active have high degree centrality in the random networks, but there are also some differences in the relative rank of mean degree centrality. We can use this information to inform our interpretation of patterns in the network as a whole.
+
+#### A modified approach to estimating edge likelihood based on similarity matrices
+
+The example above assumes we have edges associated with some externally defined confidence level. It is also possible to use our similarity matrices defined above (such as the BR similarity network) as an estimate that a given tie is present or absent. This should be done carefully as a similarity score is not the same thing as a probability in a strict sense, though there are certainly commonalities (and such similarity matrices have frequently been interpreted in a probabilistic sense in the archaeological networks literature). In the following example, we take the BR similarity matrix defined based on our ceramic data and apply a similar procedure to that illustrated above. We resample a number of random networks with ties defined as present or absent based on their associated similarity (standing in for probability). The major difference here is that we also include a threshold below which ties are always considered absent (in this case 0.25 or 25% similarity). We have tested a range of values for this cut off and produced results in line with those shown below.
+
+```{r}
+nsim <- 100
+
+net.prob <- function(x) {
+  x <- as.matrix(x)
+  x[x<0.0] <- 0 # define threshold for excluding edges
+  net.list <- list()
+  for (i in 1:nsim) {
+    y <- x
+    for (j in 1:length(x)) {y[j] <- rbinom(1,1,prob=x[j])}
+      net.list[[i]] <- network(y,directed=F)}
+  return(net.list)}
+
+# let's run the script on the BR similarity matrix
+BRprob <- net.prob(chacoBR)
+```
+
+With this procedure we can now explore the variation in centrality scores for individual nodes across all of the replicates. The distribution of values associated with a particular node can be thought of as an estimate of the credible interval we would expect for that node given our edge weights (probabilities). The boxplots we produce below show the range of values in degree centrality for each node across all replicates for each measure. Once again, the boxplots are sorted from left to right based on the observed centrality scores in the original similarity matrix so that deviations from the rank order suggest differences created by this procedure.
+
+```{r fig.height=5,fig.width=6,warning=F}
+# set up matrix and calculate eigenvector centrality for every replicate
+dg.mat <- matrix(NA,nrow(chacoBR),nsim)
+for (i in 1:nsim) {dg.mat[,i] <- sna::degree(BRprob[[i]])}
+# show boxplot of degree centrality sorted by the degree cent score in the original similarity matrix
+boxplot(t(dg.mat[order(rowSums(chacoBR)),]),main='Degree')
+
+ev.mat <- matrix(NA,nrow(chacoBR),nsim)
+for (i in 1:nsim) {ev.mat[,i] <- sna::evcent(BRprob[[i]])}
+# show boxplot of eigenvector centrality sorted by the EV cent score in the original similarity matrix
+boxplot(t(ev.mat[order(sna::evcent(chacoBR)),]),main='Eigenvector')
+
+bw.mat <- matrix(NA,nrow(chacoBR),nsim)
+for (i in 1:nsim) {bw.mat[,i] <- sna::betweenness(BRprob[[i]])}
+# show boxplot of betweenness centrality sorted by the betweenness cent score in the original similarity matrix
+boxplot(t(bw.mat[order(betweenness_w(chacoBR)[,2]),]),main='Betweenness')
+```
+
+These plots are quite useful in helping us determine the scale at which differences in centrality among sites may or may not be meaningful. Once again, we can see the instability of betweenness in our data. Interestingly, however, there are several sites characterized by consistently high betweenness in our networks that were not marked by high betweenness in the overall network. These nodes may merit additional interpretation and investigation. Interestingly, both degree and eigenvector centrality change in a similar manner with a set of highly connected nodes and others with low centrality with fewer sites in the gradient in between. At the same time, it does seem that there is some meaningful and recognizable variation among the sites with middling scores for both measures. 
+
+# Assessing sampling error in the data underlying our networks
+
+The final issue we will formally approach in this workshop (though we have others to discuss) is uncertainty in the underlying data used to generate our networks. There are many potential sources of uncertainty but here we will focus on uncertainty driven by sampling error due to the variable sizes of our ceramic assemblages (a common problem for many kinds of incidence data used to generate networks). We are interested in having some means for assessing the degree to which our results are robust to such sampling variability. In order to address this issue, we rely on a resampling procedure previously used by Peeples in work with the Southwest Social Networks team (Mills et al. 2013 - supplemental materials). 
+
+In short, we take our original matrix of ceramic counts by site and create a large number of replicates of each row with sample size held constant (as the observed sample size for that site) and with the probabilities that a given sherd will be a given type determined by the underlying multinomial frequency distribition of types at that site. In other words, we pull a bunch of random samples from the site with the probability that a given sample is a given type determined by the relative frequency of that type in the actual data. Once this procedure has been completed, we can then assess centrality metrics or any other graph, node, or edge level property and determine the degree to which absolute values and relative ranks are potentially influenced by sampling error.
+
+There are many ways to set up such a resampling procedure and many complications (for example, how do we deal with limited diversity of small samples?). For the purposes of illustration here, we will implement a very simple procedure where we simply generate new samples of a fixed size based on our observed data and determine the degree to which our network measures are robust to this perturbation. In the chunk of code below we create 100 permutations of our original incidence matrix.
+
+```{r}
+out.list <- list()
+stat.list <- list()
+nsim <- 100 # set number of simulations
+
+for (j in 1:nsim) {
+data.sim <- NULL
+# this for loop creates 1 random replicate of the underlying ceramic data 
+for (i in 1:nrow(chaco)) {
+  data.sim <- rbind(data.sim,t(rmultinom(1,rowSums(chaco)[i],prob=chaco[i,])))}
+# create weighted nework and calculate stats
+stat.list[[j]] <- net.stats.wt(sim.mat(data.sim))}
+
+# calculate correlations (Spearman's Rho) between networks based on resampled ceramic data and the original
+dg.cor <- NULL
+ev.cor <- NULL
+bw.cor <- NULL
+for (i in 1:nsim) {
+  dg.cor[i] <- cor(BR.stats.w[,1],stat.list[[i]][,1],method='spearman')
+  ev.cor[i] <- cor(BR.stats.w[,2],stat.list[[i]][,2],method='spearman')
+  bw.cor[i] <- cor(BR.stats.w[,3],stat.list[[i]][,3],method='spearman')}
+```
+
+Now lets look at histograms of the rank order correlations for our three centrality metrics. Note that the x-axis is scaled from 0.5 to 1.
+
+```{r fig.width=10}
+par(mfrow=c(1,3)) 
+hist(dg.cor,xlim=c(0.5,1),col='lightblue',main='degree')
+hist(ev.cor,xlim=c(0.5,1),col='lightblue',main='eigenvector')
+hist(bw.cor,xlim=c(0.5,1),col='lightblue',main='betweenness')
+par(mfrow=c(1,1))
+```
+
+To none of our suprise at this point, we see a high degree of correlation for degree and eigenvector centrality and considerbly lower and more variable correlations for betweenness centrality.
+
+What then about values for individual nodes. In order to explore this issue, we once again use our sorted boxplots as we did for our edge likelihood estimation approach above. Specifically, we display boxpots sorted from left to right in the rank order of values from the original network based on our original ceramic data. In the plots below we draw red lines at the observed value for each centrality metric for each site in the original network and use boxplots to show variation across the simulated reasampled networks.
+
+```{r fig.height=5,fig.width=6,warning=F}
+# set up matrix and calculate eigenvector centrality for every replicate
+dg.mat <- matrix(NA,nrow(chacoBR),nsim)
+for (i in 1:nsim) {dg.mat <- cbind(dg.mat,stat.list[[i]][,1])}
+# show boxplot of degree centrality sorted by the degree cent score in the original similarity matrix
+boxplot(t(dg.mat[order(rowSums(chacoBR)),]),main='Degree')
+lines(sort(BR.stats.w[,1]),col='red',lwd=3)
+
+ev.mat <- matrix(NA,nrow(chacoBR),nsim)
+for (i in 1:nsim) {ev.mat <- cbind(ev.mat,stat.list[[i]][,2])}
+# show boxplot of eigenvector centrality sorted by the EV cent score in the original similarity matrix
+boxplot(t(ev.mat[order(sna::evcent(chacoBR)),]),main='Eigenvector')
+lines(sort(BR.stats.w[,2]),col='red',lwd=3)
+
+bw.mat <- matrix(NA,nrow(chacoBR),nsim)
+for (i in 1:nsim) {bw.mat <- cbind(bw.mat,stat.list[[i]][,3])}
+# show boxplot of betweenness centrality sorted by the betweenness cent score in the original similarity matrix
+boxplot(t(bw.mat[order(betweenness_w(chacoBR)[,2]),]),main='Betweenness')
+lines(sort(BR.stats.w[,3]),col='red',lwd=3)
+```
+
+Once again we see considerable variability in betweenness and a good match between observed and resampled networks for degree and eigenvector. Intrestingly, we see for both degree and eigenvector points with middling scores tend to vary more in relation to sampling error, indeed we have investigated the raw scores and found that sites with small samples and middling scores are considerably more influenced by the vagaries of sampling than other sites. Importantly, this test also shows that for degree and eigenvector centrality, we can be resonably confident that a site is either low, intermediate, or high even if we are less sure of the precise relative rank order.
+
+Now as a final means for exploring these data we can look at the relationship between sample size in our original data table the range of variation represented by the estimated 95% credible interval for each node.
+
+```{r fig.width=5,fig.height=5}
+dg.new <- NULL
+for (i in 1:nsim) {dg.new <- cbind(dg.new,stat.list[[i]][,1])}
+ q.rng <- matrix(NA,nrow(chaco),nsim)
+ for (i in 1:nrow(chaco)) {
+   q.rng[i,] <- quantile(dg.new[i,],probs=c(0.2,0.95))
+   q.rng2 <- q.rng[,2]-q.rng[,1]}
+ plot(log(rowSums(chaco)),q.rng2,pch=16,cex=0.5,xlab='Log Sample Size',ylab='Range of 95% interval',main='Degree')
+ 
+ev.new <- NULL
+for (i in 1:nsim) {ev.new <- cbind(ev.new,stat.list[[i]][,2])}
+ q.rng <- matrix(NA,nrow(chaco),nsim)
+ for (i in 1:nrow(chaco)) {
+   q.rng[i,] <- quantile(ev.new[i,],probs=c(0.2,0.95))
+   q.rng2 <- q.rng[,2]-q.rng[,1]}
+ plot(log(rowSums(chaco)),q.rng2,pch=16,cex=0.5,xlab='Log Sample Size',ylab='Range of 95% interval',main='Eigenvector')
+ 
+bw.new <- NULL
+for (i in 1:nsim) {bw.new <- cbind(bw.new,stat.list[[i]][,3])}
+ q.rng <- matrix(NA,nrow(chaco),nsim)
+ for (i in 1:nrow(chaco)) {
+   q.rng[i,] <- quantile(bw.new[i,],probs=c(0.2,0.95))
+   q.rng2 <- q.rng[,2]-q.rng[,1]}
+ plot(log(rowSums(chaco)),q.rng2,pch=16,cex=0.5,xlab='Log Sample Size',ylab='Range of 95% interval',main='Betweenness')
+```
+
+As these plots illustrate, there is considerably more variability among sites with small samples (as we would expect) for both degree and eigenvector centrality and less predictable results for betweenness. We have conducted similar analyses for binary networks with similar results.
+
+# Future directions
+
+This document is by no means an exhaustive list of all of the potential sources of uncertainty in archaeological networks nor is it comprehensive in terms of the potential methods for dealing with such uncertainty. We do hope, however, that we have provided a set of useful heuristics and specific tools for identifying the sources of variation in archaeological networks, and importantly, trying to correct for it wherever possible. We feel that all archaeological network studies should include some kind of exploratory sensitivity analysis and hope that the approach we have explored here will inspire you all to try this out on your own data. 
+
+# References Cited
+
+Borgatti, Stephen P., and Martin G. Everett
+ 2006	A Graph-Theoretic Perspective on Centrality. Social Networks 28(4): 466-484.
+
+Brughmans, Tom
+ 2013	Thinking Through Networks: A Review of Formal Network Methods in Archaeology. Journal of Archaeological Method and Theory 20: 623-662.
+
+Costenbader, E, and TW Valente
+ 2003	The Stability of Centrality Measures When Networks Are Sampled. Social Networks 25(4): 283-307.
+
+Everton, Sean F.
+ 2012	Disrupting Dark Networks. Cambridge University Press.
+
+Mills, Barbara J, Jeffery J Clark, Matthew A Peeples, et al.
+ 2013	Transformation of Social Networks in the Late Pre-Hispanic US Southwest. Proceedings of the National Academy of Sciences of the United States of America: 1-6.
+
+Opsahl, Tore, Filip Agneessens, and John Skvoretz
+ 2010	Node Centrality in Weighted Networks: Generalizing Degree and Shortest Paths. Social Networks 32(3): 245-251.
+
+Peeples, Matthew A., Barbara J. Mills, W. Randall Jr. Haas, Jeffery J. Clark, and John M. Jr. Roberts
+ 2016	Analytical Challenges for the Application of Social Network Analysis in Archaeology. In The Connected Past: Challenges to Network Studies in Archaeology and History. Tom Brughmans, Anna Collar, and Fiona Coward, eds. Pp. 59-84. Oxford: Oxford University Press.
+
+Peeples, Matthew A., and John M. Roberts
+ 2013	To Binarize or Not to Binarize: Relational Data and the Construction of Archaeological Networks. Journal of Archaeological Science 40(7): 3001-3010.
